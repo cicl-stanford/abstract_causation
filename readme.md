@@ -8,6 +8,13 @@ What shape do people's mental models take? We hypothesize that people build caus
 
 ![model](figures/diagrams/prediction_task_diagram.png)
 
+## Pre-registrations
+
+- the pre-registrations for all experiments may be accessed via the Open Science Framework [here](https://osf.io/fetm7/)
+- separate links for each experiment:
+	+ [Experiment 1 (feedback)](https://osf.io/qyp9j), [Experiment 1 (no feedback)](https://osf.io/stzj3), [Experiment 1 (short)](https://osf.io/8r6qd), [Experiment 1 (conjunctive)](https://osf.io/3fmnc)
+	+ [Experiment 2 (long)](https://osf.io/z7hr6), [Experiment 2 (short)](https://osf.io/hzfx7), [Experiment 2 (conjunctive)](https://osf.io/5jt6c) 
+
 ## Repo structure
 
 ```
@@ -40,7 +47,7 @@ What shape do people's mental models take? We hypothesize that people build caus
 #### R
 
 - analysis scripts 
-- you can see the rendered analysis script [here](https://cicl-stanford.github.io/abstract_causation/experiments/analysis/)
+- you can see the rendered analysis script [here](https://cicl-stanford.github.io/abstract_causation/analysis/)
 
 #### blender
 
