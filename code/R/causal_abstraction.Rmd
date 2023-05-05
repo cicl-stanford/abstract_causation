@@ -1,0 +1,1963 @@
+---
+title: "Causal abstraction"
+author: "Steven Shin & Tobias Gerstenberg"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  bookdown::html_document2:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    theme: cosmo
+    highlight: tango
+---
+
+# Load packages
+
+```{r, message=F}
+library("knitr")
+library("rstatix")
+library("emmeans")
+library("broom.mixed")
+library("kableExtra")
+library("brms")
+library("Hmisc")
+library("boot")
+library("nnet")
+library("modelr")
+library("lme4")
+library("brms")
+library("corrr")
+library("tidybayes")
+library("janitor")
+library("patchwork")
+library("ggtext")
+library("rstatix")
+library("rsample")
+library("png")
+library("grid")
+library("egg")        
+library("glue")      
+library("ggeffects")      
+library("xtable")      
+library("tidyverse")
+```
+
+# Set options
+
+```{r}
+theme_set(theme_classic() + 
+    theme(text = element_text(size = 24)))
+
+opts_chunk$set(comment = "",
+               fig.show = "hold")
+
+# suppress grouping warning 
+options(dplyr.summarise.inform = F)
+
+# use effects contrast coding to interpret effects from categorical variables as main effects 
+options(contrasts = c("contr.sum", "contr.poly"))
+```
+
+# Functions
+
+## Print table
+
+```{r}
+# function for printing out html or latex tables 
+print_table = function(data, format = "html", digits = 2){
+  if(format == "html"){
+    data %>% 
+      kable(digits = digits) %>% 
+      kable_styling()
+  }else if(format == "latex"){
+    data %>% 
+      xtable(digits = digits,
+             caption = "Caption",
+             label = "tab:table") %>%
+      print(include.rownames = F,
+            booktabs = T,
+            sanitize.colnames.function = identity,
+            caption.placement = "top")
+  }
+}
+```
+
+
+## Round off
+
+```{r}
+round.off = function (x, digits=0) 
+{
+  posneg = sign(x)
+  z = trunc(abs(x) * 10 ^ (digits + 1)) / 10
+  z = floor(z * posneg + 0.5) / 10 ^ digits
+  return(z)
+}
+```
+
+
+## Blickets: Count plot
+
+```{r}
+fun_plot_count = function(data){
+  df.symbols = tibble(x = sort(data$blicket_response),
+                      y = 95,
+                      symbol = c("\u25A0", "\u25A1", "\u25CF", "\u25CB"))
+  
+  plot = ggplot(data = data,
+                mapping = aes(x = blicket_response,
+                              y = n)) +
+    geom_col(mapping = aes(fill = color),
+             color = "black",
+             show.legend = F) +
+    geom_text(data = df.symbols,
+              mapping = aes(x = x,
+                            y = y,
+                            label = symbol),
+              size = 20,
+              show.legend = F,
+              family = "Arial Unicode MS") + 
+    geom_linerange(mapping = aes(x = blicket_response,
+                                 ymin = low, 
+                                 ymax = high)) +
+    scale_fill_manual(values = c("0" = "gray80",
+                                 "1" = "orange")) + 
+    scale_color_manual(values = c("1" = "black",
+                                  "2" = "gray90")) + 
+    scale_y_continuous(limits = c(0, 102),
+                       breaks = seq(0, 80, 20),
+                       expand = expansion(add = c(0, 0))) + 
+    labs(y = "# selections") +
+    theme(axis.title.x = element_blank(),
+          text = element_text(size = 24))
+  return(plot)
+}
+```
+
+## Physics: Count plot 
+
+```{r}
+fun_plot_count_physics = function(data, name){
+  
+  fun_load_image = function(image){
+    readPNG(str_c("../../figures/diagrams/selection/", name, image, ".png"))
+  }
+  
+  df.images = data %>% 
+    distinct(end_position) %>% 
+    mutate(grob = map(.x = end_position,
+                      .f = ~ fun_load_image(image = .x)))
+  
+  df.text = df.plot %>% 
+    distinct(end_position) %>% 
+    mutate(x = 4,
+           y = 160,
+           text = 1:4)
+  
+  plot = ggplot(data = df.plot,
+                mapping = aes(x = selected_position,
+                              y = n,
+                              fill = fill)) + 
+    geom_bar(stat = "identity",
+             color = "black") + 
+    geom_linerange(mapping = aes(ymin = low,
+                                 ymax = high)) + 
+    geom_custom(data = df.images,
+                mapping = aes(data = grob,
+                              x = -Inf,
+                              y = Inf,
+                              fill = NA),
+                grob_fun = function(x) rasterGrob(x,
+                                                  interpolate = T,
+                                                  vjust = -0.05,
+                                                  hjust = 0)) + 
+    geom_text(data = df.text,
+              mapping = aes(x = x,
+                            y = y,
+                            label = text,
+                            fill = NA),
+              color = "white",
+              size = 8) + 
+    facet_wrap(~ end_position,
+               nrow = 1) + 
+    labs(x = "selection",
+         y = "count") + 
+    scale_fill_manual(values = c("0" = "gray80",
+                                 "1" = "darkgreen",
+                                 "2" = "orange")) +
+    scale_y_continuous(breaks = seq(0, 80, 20),
+                       expand = expansion(add = c(0, 5))) + 
+    coord_cartesian(clip = "off",
+                    ylim = c(0, 95)) + 
+    
+    theme(legend.position = "none",
+          panel.grid.major.y = element_line(),
+          strip.background = element_blank(),
+          strip.text = element_blank(),
+          plot.margin = margin(t = 3.5, l = 0.2, r = 0.2, b = 0.1, unit = "cm"))
+  return(plot)
+}
+```
+
+
+## Accuracy plot
+
+```{r}
+fun_plot_accuracy = function(data, limit){
+  plot = ggplot(data = data,
+         mapping = aes(x = trial_index,
+                       y = accuracy)) + 
+    geom_smooth(method = "glm",
+                formula = "y ~ x",
+                method.args = list(family = "binomial"),
+                se = F,
+                color = "gray80") +
+    stat_summary(fun.data = "mean_cl_boot",
+                 fill = "darkgreen",
+                 shape = 21,
+                 size = 1) + 
+    scale_x_continuous(breaks = 1:limit,
+                       limits = c(1, limit)) +
+    scale_y_continuous(breaks = seq(0.4, 1, 0.1),
+                       labels = str_c(seq(40, 100, 10), "%")) +
+    coord_cartesian(ylim = c(0.35, 1)) + 
+    labs( x = "trial", y = "accuracy") + 
+    theme(panel.grid.major.y = element_line(),
+          text = element_text(size = 24))
+  return(plot)
+}
+```
+
+
+# EXPERIMENT 1: Feedback
+
+## DATA
+
+### Read data
+
+```{r}
+df.ex1.trials = read.csv("../../data/experiment1/causal_abstraction-trials.csv")
+df.ex1.participants = read.csv("../../data/experiment1/causal_abstraction-participants.csv")
+# df.ex1.prolific_ids = read.csv("../../data/experiment1/causal_abstraction-workerids.csv")
+```
+
+### Participant bonuses
+
+```{r, eval=F}
+# remove pilot trials
+df.ex1.rewards = df.ex1.participants %>% 
+  filter(proliferate.condition != "pilot")
+
+#There are two instances of workerid==384 (likely an error with the experiment software)
+#remove the instance with lower reward (bonus == 0.4)
+#this will apply the higher reward (bonus == 0.8) to both 
+df.ex1.rewards = df.ex1.rewards  %>% 
+  select(workerid, bonus) %>% 
+  filter(!(workerid==384 & bonus==0.4))
+
+# merge bonuses with prolific ids
+df.ex1.rewards = df.ex1.rewards %>% 
+  select(workerid, bonus) %>% 
+  inner_join(df.ex1.prolific_ids,
+             by = "workerid") %>% 
+  select(-workerid) %>% 
+  relocate(prolific_participant_id) %>% 
+  filter(bonus > 0)
+
+# calculate average reward
+average_reward = mean(df.ex1.rewards$bonus)
+average_reward
+
+write_csv(df.ex1.rewards, "../../data/experiment1/experiment_1-bonuses.csv")
+```
+
+### Wrangle
+
+```{r}
+# remove pilot data
+df.ex1.trials = df.ex1.trials %>% 
+  filter(proliferate.condition != 'pilot')
+
+# reassign problematic workerid (two instances of workerid==384)
+df.ex1.trials = df.ex1.trials %>% 
+  rowid_to_column()
+df.ex1.trials$workerid[df.ex1.trials$rowid >= 253 & df.ex1.trials$rowid <= 270] = 584
+df.ex1.trials = df.ex1.trials %>% 
+  select(-rowid)
+
+# reassign for participants as well (ensuring the correct participant is changed)
+part_584_acc = mean(df.ex1.trials$accuracy_bool[df.ex1.trials$workerid==584 & df.ex1.trials$trial=='blicket'])
+df.ex1.participants$workerid[df.ex1.participants$workerid == 384 & df.ex1.participants$overall_accuracy ==part_584_acc] = 584
+
+# summarize pop quiz performance for each participant
+df.ex1.pop_quiz = df.ex1.trials %>%
+  filter(trial=='pop_quiz') %>% 
+  mutate(
+    correct_color = case_when(substr(correct_response, 1, 1) == substr(response, 1, 1) ~ 1, TRUE ~ 0),
+    correct_shape = case_when(substr(correct_response, 2, 2) == substr(response, 2, 2) ~ 1, TRUE ~ 0),
+    rule_class = case_when(rule=='cube'|rule=='cylinder' ~ 'shape',
+                           rule=='dark'|rule=='light' ~ 'color'),
+    blicket_response = case_when(
+      correct_color == 1 & correct_shape == 1 ~ 'fully_congruent',
+      correct_color == 0 & correct_shape == 0 ~ 'fully_incongruent',
+      rule_class == 'color' & correct_color == 1 ~ 'rule_congruent',
+      rule_class == 'shape' & correct_shape == 1 ~ 'rule_congruent',
+      rule_class == 'color' & correct_shape == 1 ~ 'rule_incongruent',
+      rule_class == 'shape' & correct_color == 1 ~ 'rule_incongruent'),
+    rule_relevant_correct = case_when(
+      (rule_class == 'color' & correct_color == 1)|(rule_class == 'shape' & correct_shape == 1) ~ 1,
+      (rule_class == 'color' & correct_color == 0)|(rule_class == 'shape' & correct_shape == 0) ~ 0),
+    rule_irrelevant_correct = case_when(
+      (rule_class == 'color' & correct_shape == 1)|(rule_class == 'shape' & correct_color == 1) ~ 1,
+      (rule_class == 'color' & correct_shape == 0)|(rule_class == 'shape' & correct_color == 0) ~ 0),
+    on_off = case_when(
+      grepl('on', proliferate.condition) ~ 'on',
+      grepl('off', proliferate.condition) ~ 'off'))%>% 
+  select(workerid, correct_color, correct_shape, rule_class, rule, blicket_response, on_off, rule_relevant_correct, rule_irrelevant_correct) 
+
+# summarize performance on each trial type for each participant
+df.ex1.participant_summary = df.ex1.trials %>% 
+  select(-question_order, -error) %>% 
+  mutate(accuracy = case_when(accuracy== 'True' ~1, accuracy=='False'~0)) %>% 
+  group_by(workerid, rule, trial) %>% 
+  summarize(accuracy = mean(accuracy), rt = mean(rt)) %>% 
+  inner_join(df.ex1.pop_quiz,
+             by = c("workerid", "rule")) %>% #add back in pop_quiz info
+  pivot_wider(names_from = trial, values_from = c(rt, accuracy)) %>% #one participant per line
+  ungroup()
+
+# full dataset (speficic info from every trial, along with summary info)
+df.ex1.full = df.ex1.trials %>% 
+  select(workerid,
+         accuracy_bool,
+         rt,
+         trial,
+         trial_index) %>% 
+  inner_join(df.ex1.participant_summary,
+             by = "workerid") %>% 
+  rename(accuracy = accuracy_bool,) %>% 
+  group_by(workerid) %>% 
+  # make sure trials are 1-18
+  mutate( first_blicket_index = min(trial_index),
+          trial_index = case_when(
+            trial == 'blicket' ~ (trial_index - first_blicket_index) / 2 + 1,
+            trial == "pop_quiz" ~ 17,
+            trial == "rule_question" ~ 18)) %>% 
+  select(-first_blicket_index) %>% 
+  ungroup()
+```
+
+## STATS
+
+#### Bootstrap counts
+
+```{r, cache=TRUE}
+#make reproducible
+set.seed(1)
+
+#get boostrapped confidence intervals 
+df.ex1.fig1_CI = df.ex1.participant_summary %>%
+  select(blicket_response) %>% 
+  bootstrap(n = 1000) %>% # create 1000 bootstrapped samples
+  mutate(counts = map(.x = strap,
+                            .f = ~ .x %>% 
+                              as_tibble() %>% 
+                              group_by(blicket_response) %>% 
+                              count(blicket_response))) %>% 
+  select(-strap) %>% 
+  unnest(counts) %>% 
+  group_by(blicket_response) %>% 
+  summarize(mean = mean(n),
+            low = quantile(n, 0.025), # calculate the 2.5 / 97.5 percentiles
+            high = quantile(n, 0.975))
+
+#create data for plot
+df.ex1.fig1 = df.ex1.participant_summary %>% 
+  group_by(blicket_response) %>% 
+  count(blicket_response) %>% 
+  inner_join(df.ex1.fig1_CI,
+             by = "blicket_response") %>% 
+  ungroup() %>% 
+  mutate(color = as.factor(c(0, 0, 1, 0))) 
+```
+
+### Multinomial regression
+
+```{r}
+# reference = 'rule incongruent'
+df.model = df.ex1.participant_summary %>% 
+  mutate(blicket_response = fct_relevel(blicket_response, "rule_incongruent"))
+
+fit = multinom(formula = blicket_response ~ 1,
+               data = df.model,
+               trace = F)
+
+#broom.mixed summary
+df.tidy = tidy(fit,
+               conf.int = T) %>% 
+  mutate(across(where(is.numeric), ~ round(., 2))) %>% 
+  filter(y.level == "rule_congruent")
+  
+str_c("B = ", df.tidy$estimate, 
+      ", 95% CI [", df.tidy$conf.low, ", ", df.tidy$conf.high, "],",
+      " p = ", p_format(df.tidy$p.value, leading.zero = F))
+```
+
+### Accuracy as a function of outcome
+
+```{r}
+df.ex1.accuracy_outcome = df.ex1.participant_summary %>% 
+  count(on_off, accuracy_pop_quiz) %>% 
+  pivot_wider(names_from = accuracy_pop_quiz,
+              values_from = n) %>% 
+  mutate(percentage = `1` / (`0` + `1`))
+
+df.ex1.accuracy_outcome %>% 
+  print_table()
+```
+
+## FIGURES
+
+### Count
+
+```{r fig.width=8, fig.height=6}
+df.plot = df.ex1.fig1 %>% 
+  mutate(blicket_response = factor(blicket_response,
+                                   levels = c("fully_congruent",
+                                              "rule_congruent",
+                                              "rule_incongruent",
+                                              "fully_incongruent"),
+                                   labels = c("congruent",
+                                              "rule\ncongruent",
+                                              "rule\nincongruent",
+                                              "incongruent")))
+
+plot.ex1 = fun_plot_count(data = df.plot)
+plot.ex1
+
+ggsave(filename = "../../figures/plots/exp1_response_count.pdf",
+       width = 8,
+       height = 6,
+       device = cairo_pdf)
+```
+
+### Accuracy over time
+
+```{r, fig.width=8, fig.height=4}
+df.plot = df.ex1.full %>% 
+  filter(trial == "blicket")
+
+fun_plot_accuracy(data = df.plot,
+                  limit = 16)
+
+ggsave(filename = "../../figures/plots/exp1_accuracy.pdf",
+       width = 8,
+       height = 4)
+```
+
+# EXPERIMENT 2: No feedback
+
+## DATA
+
+### Read data
+
+```{r}
+df.ex2.trials = read.csv("../../data/experiment2/causal_abstraction2-trials.csv")
+df.ex2.participants = read.csv("../../data/experiment2/causal_abstraction2-participants.csv")
+# df.ex2.prolific_ids = read.csv("../../data/experiment2/causal_abstraction2-workerids.csv")
+```
+
+### Participant bonuses
+
+```{r, eval=FALSE}
+#merge bonuses with prolific ids
+df.ex2.rewards = df.ex2.participants %>% 
+  select(workerid, bonus) %>% 
+  inner_join(df.ex2.prolific_ids) %>% 
+  select(-workerid) %>% 
+  relocate(prolific_participant_id) %>% 
+  mutate(bonus = round.off(bonus, 2)) %>% 
+  filter(bonus > 0)
+
+#calculate average reward
+average_reward = mean(df.ex2.rewards$bonus)
+average_reward
+
+write.table(df.ex2.rewards, "../../data/experiment2/experiment_2-bonuses.csv", sep = ",", col.names = FALSE, row.names = FALSE)
+``` 
+
+### Wrangle
+
+```{r}
+#summarize pop quiz performance for each participant
+df.ex2.pop_quiz = df.ex2.trials %>%
+  filter(trial=='pop_quiz') %>% 
+  mutate(
+    correct_color = case_when(substr(correct_response, 1, 1) == substr(response, 1, 1) ~ 1, TRUE ~ 0),
+    correct_shape = case_when(substr(correct_response, 2, 2) == substr(response, 2, 2) ~ 1, TRUE ~ 0),
+    rule_class = case_when(rule=='cube'|rule=='cylinder' ~ 'shape',
+                           rule=='dark'|rule=='light' ~ 'color'),
+    blicket_response = case_when(
+      correct_color == 1 & correct_shape == 1 ~ 'fully_congruent',
+      correct_color == 0 & correct_shape == 0 ~ 'fully_incongruent',
+      rule_class == 'color' & correct_color == 1 ~ 'rule_congruent',
+      rule_class == 'shape' & correct_shape == 1 ~ 'rule_congruent',
+      rule_class == 'color' & correct_shape == 1 ~ 'rule_incongruent',
+      rule_class == 'shape' & correct_color == 1 ~ 'rule_incongruent'),
+    rule_relevant_correct = case_when(
+      (rule_class == 'color' & correct_color == 1)|(rule_class == 'shape' & correct_shape == 1) ~ 1,
+      (rule_class == 'color' & correct_color == 0)|(rule_class == 'shape' & correct_shape == 0) ~ 0),
+    rule_irrelevant_correct = case_when(
+      (rule_class == 'color' & correct_shape == 1)|(rule_class == 'shape' & correct_color == 1) ~ 1,
+      (rule_class == 'color' & correct_shape == 0)|(rule_class == 'shape' & correct_color == 0) ~ 0),
+    on_off = case_when(
+      grepl('on', proliferate.condition) ~ 'on',
+      grepl('off', proliferate.condition) ~ 'off'))%>% 
+  select(workerid, correct_color, correct_shape, rule_class, rule, blicket_response, on_off, rule_relevant_correct, rule_irrelevant_correct)
+
+#summarize performance on each trial type for each participant
+df.ex2.participant_summary = df.ex2.trials %>% 
+  select(-question_order, -error) %>% 
+  mutate(accuracy = case_when(accuracy== 'True' ~1, accuracy=='False'~0)) %>% 
+  group_by(workerid, rule, trial) %>% 
+  summarize(accuracy = mean(accuracy), rt = mean(rt)) %>% 
+  inner_join(df.ex2.pop_quiz,
+             by = c("workerid", "rule")) %>% #add back in pop_quiz info
+  pivot_wider(names_from = trial, values_from = c(rt, accuracy)) %>%  #one participant per line
+  ungroup()
+
+
+#full dataset (speficic info from every trial, along with summary info)
+df.ex2.full = df.ex2.trials %>% 
+  select(workerid,
+         accuracy_bool,
+         rt,
+         trial,
+         trial_index) %>% 
+  inner_join(df.ex2.participant_summary,
+             by = "workerid") %>% 
+  rename(accuracy = accuracy_bool,) %>% 
+  group_by(workerid) %>% 
+  #make sure trials are 1-18
+  mutate( first_blicket_index = min(trial_index),
+          trial_index = case_when(
+            trial == 'blicket' ~ (trial_index - first_blicket_index) / 2 + 1,
+            trial == "pop_quiz" ~ 17,
+            trial == "rule_question" ~ 18)) %>% 
+  select(-first_blicket_index)
+```
+
+## STATS
+
+### Bootstrap counts
+
+```{r, cache=TRUE}
+#make reproducible
+set.seed(1)
+
+#get boostrapped confidence intervals 
+df.ex2.fig1_CI = df.ex2.participant_summary %>%
+  select(blicket_response) %>% 
+  bootstrap(n = 1000) %>% # create 1000 bootstrapped samples
+  mutate(counts = map(.x = strap,
+                            .f = ~ .x %>% 
+                              as_tibble() %>% 
+                              group_by(blicket_response) %>% 
+                              count(blicket_response)))%>% 
+  select(-strap) %>% 
+  unnest(counts) %>% 
+  group_by(blicket_response) %>% 
+  summarize(mean = mean(n),
+            low = quantile(n, 0.025), # calculate the 2.5 / 97.5 percentiles
+            high = quantile(n, 0.975))
+
+#create data for plot
+df.ex2.fig1 = df.ex2.participant_summary %>% 
+  group_by(blicket_response) %>% 
+  count(blicket_response) %>% 
+  inner_join(df.ex2.fig1_CI,
+             by = "blicket_response") %>% 
+  ungroup() %>% 
+  mutate(color = as.factor(c(0, 0, 1, 0))) 
+```
+
+### Multinomial regression
+
+```{r, message=FALSE, warning=FALSE}
+# reference = 'rule incongruent'
+df.model = df.ex2.participant_summary %>% 
+  mutate(blicket_response = fct_relevel(blicket_response, "rule_incongruent"))
+
+fit = multinom(formula = blicket_response ~ 1,
+               data = df.model,
+               trace = F)
+
+#broom.mixed summary
+df.tidy = tidy(fit,
+               conf.int = T) %>% 
+  mutate(across(where(is.numeric), ~ round(., 2))) %>% 
+  filter(y.level == "rule_congruent")
+  
+str_c("B = ", df.tidy$estimate, 
+      ", 95% CI [", df.tidy$conf.low, ", ", df.tidy$conf.high, "],",
+      " p = ", p_format(df.tidy$p.value, leading.zero = F))
+```
+
+### Accuracy as a function of outcome
+
+```{r}
+df.ex2.accuracy_outcome = df.ex2.participant_summary %>% 
+  count(on_off, accuracy_pop_quiz) %>% 
+  pivot_wider(names_from = accuracy_pop_quiz,
+              values_from = n) %>% 
+  mutate(percentage = `1` / (`0` + `1`))
+
+df.ex2.accuracy_outcome %>% 
+  print_table()
+```
+
+## FIGURES
+
+### Count
+
+```{r fig.height=6, fig.width=8}
+df.plot = df.ex2.fig1 %>% 
+  mutate(blicket_response = factor(blicket_response,
+                                   levels = c("fully_congruent",
+                                              "rule_congruent",
+                                              "rule_incongruent",
+                                              "fully_incongruent"),
+                                   labels = c("congruent",
+                                              "rule\ncongruent",
+                                              "rule\nincongruent",
+                                              "incongruent")))
+
+plot.ex2 = fun_plot_count(data = df.plot)
+plot.ex2
+
+ggsave(filename = "../../figures/plots/exp2_response_count.pdf",
+       width = 8,
+       height = 6,
+       device = cairo_pdf)
+```
+
+### Accuracy over time
+
+```{r}
+df.plot = df.ex2.full %>% 
+  filter(trial == "blicket")
+
+fun_plot_accuracy(data = df.plot,
+  limit = 16)
+
+ggsave(filename = "../../figures/plots/exp2_accuracy.pdf",
+       width = 8,
+       height = 4)
+```
+
+# EXPERIMENT 3: Short
+
+## DATA
+
+### Read data
+
+```{r}
+df.ex3.trials = read.csv("../../data/experiment3/causal_abstraction3-trials.csv")
+df.ex3.participants = read.csv("../../data/experiment3/causal_abstraction3-participants.csv")
+# df.ex3.prolific_ids = read.csv("../../data/experiment3/causal_abstraction3-workerids.csv")
+```
+
+### Calculate participant bonuses
+```{r, eval=FALSE}
+# merge bonuses with prolific ids
+df.ex3.rewards = df.ex3.participants %>% 
+  select(workerid, bonus) %>% 
+  inner_join(df.ex3.prolific_ids) %>% 
+  select(-workerid) %>% 
+  relocate(prolific_participant_id) %>% 
+  mutate(bonus = round.off(bonus, 2))
+
+# calculate average reward
+average_reward = mean(df.ex3.rewards$bonus)
+average_reward
+
+write.table(df.ex3.rewards, "../../data/experiment3/experiment_3-bonuses.csv", sep = ",", col.names = FALSE, row.names = FALSE)
+``` 
+
+### Wrangle
+
+```{r}
+# summarize pop quiz performance for each participant
+df.ex3.pop_quiz = df.ex3.trials %>%
+  filter(trial=='pop_quiz') %>% 
+  mutate(
+    correct_color = case_when(substr(correct_response, 1, 1) == substr(response, 1, 1) ~ 1, TRUE ~ 0),
+    correct_shape = case_when(substr(correct_response, 2, 2) == substr(response, 2, 2) ~ 1, TRUE ~ 0),
+    rule_class = case_when(rule=='cube'|rule=='cylinder' ~ 'shape',
+                           rule=='dark'|rule=='light' ~ 'color'),
+    blicket_response = case_when(
+      correct_color == 1 & correct_shape == 1 ~ 'fully_congruent',
+      correct_color == 0 & correct_shape == 0 ~ 'fully_incongruent',
+      rule_class == 'color' & correct_color == 1 ~ 'rule_congruent',
+      rule_class == 'shape' & correct_shape == 1 ~ 'rule_congruent',
+      rule_class == 'color' & correct_shape == 1 ~ 'rule_incongruent',
+      rule_class == 'shape' & correct_color == 1 ~ 'rule_incongruent'),
+    rule_relevant_correct = case_when(
+      (rule_class == 'color' & correct_color == 1)|(rule_class == 'shape' & correct_shape == 1) ~ 1,
+      (rule_class == 'color' & correct_color == 0)|(rule_class == 'shape' & correct_shape == 0) ~ 0),
+    rule_irrelevant_correct = case_when(
+      (rule_class == 'color' & correct_shape == 1)|(rule_class == 'shape' & correct_color == 1) ~ 1,
+      (rule_class == 'color' & correct_shape == 0)|(rule_class == 'shape' & correct_color == 0) ~ 0),
+    on_off = case_when(
+      grepl('on', proliferate.condition) ~ 'on',
+      grepl('off', proliferate.condition) ~ 'off'))%>% 
+  select(workerid, correct_color, correct_shape, rule_class, rule, blicket_response, on_off, rule_relevant_correct, rule_irrelevant_correct)
+
+# summarize performance on each trial type for each participant
+df.ex3.participant_summary = df.ex3.trials %>% 
+  select(-question_order, -error) %>% 
+  mutate(accuracy = case_when(accuracy== 'True' ~1, accuracy=='False'~0)) %>% 
+  group_by(workerid, rule, trial) %>% 
+  summarize(accuracy = mean(accuracy), rt = mean(rt)) %>% 
+  inner_join(df.ex3.pop_quiz,
+             by = c("workerid", "rule")) %>% #add back in pop_quiz info
+  pivot_wider(names_from = trial, values_from = c(rt, accuracy)) %>%  #one participant per line
+  ungroup()
+
+# full dataset (specific info from every trial, along with summary info)
+df.ex3.full = df.ex3.trials %>% 
+  select(workerid,
+         accuracy_bool,
+         rt,
+         trial,
+         trial_index) %>% 
+  inner_join(df.ex3.participant_summary,
+             by = "workerid") %>% 
+  rename(accuracy = accuracy_bool,) %>% 
+  group_by(workerid) %>% 
+  # make sure trials are 1-18
+  mutate( first_blicket_index = min(trial_index),
+          trial_index = case_when(
+            trial == 'blicket' ~ (trial_index - first_blicket_index) / 2 + 1,
+            trial == "pop_quiz" ~ 17,
+            trial == "rule_question" ~ 18)) %>% 
+  select(-first_blicket_index) %>% 
+  ungroup()
+```
+
+## STATS
+
+### Bootstrap counts
+
+```{r, cache=TRUE}
+#make reproducible
+set.seed(1)
+
+#get boostrapped confidence intervals 
+df.ex3.fig1_CI = df.ex3.participant_summary %>%
+  select(blicket_response) %>% 
+  bootstrap(n = 1000) %>% # create 1000 bootstrapped samples
+  mutate(counts = map(.x = strap,
+                            .f = ~ .x %>% 
+                              as_tibble() %>% 
+                              group_by(blicket_response) %>% 
+                              count(blicket_response)))%>% 
+  select(-strap) %>% 
+  unnest(counts) %>% 
+  group_by(blicket_response) %>% 
+  summarize(mean = mean(n),
+            low = quantile(n, 0.025), # calculate the 2.5 / 97.5 percentiles
+            high = quantile(n, 0.975))
+
+#create data for plot
+df.ex3.fig1 = df.ex3.participant_summary %>% 
+  group_by(blicket_response) %>% 
+  count(blicket_response) %>% 
+  inner_join(df.ex3.fig1_CI,
+             by = "blicket_response") %>% 
+  ungroup() %>% 
+  mutate(color = as.factor(c(0, 0, 1, 0))) 
+```
+
+### Multinomial Regression
+
+```{r, message=FALSE, warning=FALSE}
+# reference = 'rule incongruent'
+df.model = df.ex3.participant_summary %>% 
+  mutate(blicket_response = fct_relevel(blicket_response, "rule_incongruent"))
+
+fit = multinom(formula = blicket_response ~ 1,
+               data = df.model,
+               trace = F)
+
+#broom.mixed summary
+df.tidy = tidy(fit,
+               conf.int = T) %>% 
+  mutate(across(where(is.numeric), ~ round(., 2))) %>% 
+  filter(y.level == "rule_congruent")
+  
+str_c("B = ", df.tidy$estimate, 
+      ", 95% CI [", df.tidy$conf.low, ", ", df.tidy$conf.high, "],",
+      " p = ", p_format(df.tidy$p.value, leading.zero = F))
+```
+
+### Accuracy as a function of outcome
+
+```{r}
+df.ex3.accuracy_outcome = df.ex3.participant_summary %>% 
+  count(on_off, accuracy_pop_quiz) %>% 
+  pivot_wider(names_from = accuracy_pop_quiz,
+              values_from = n) %>% 
+  mutate(percentage = `1` / (`0` + `1`))
+
+df.ex3.accuracy_outcome %>% 
+  print_table()
+```
+
+## Figures
+
+#### Count
+
+```{r fig.height=6, fig.width=8}
+df.plot = df.ex3.fig1 %>% 
+  mutate(blicket_response = factor(blicket_response,
+                                   levels = c("fully_congruent",
+                                              "rule_congruent",
+                                              "rule_incongruent",
+                                              "fully_incongruent"),
+                                   labels = c("congruent",
+                                              "rule\ncongruent",
+                                              "rule\nincongruent",
+                                              "incongruent")))
+
+plot.ex3 = fun_plot_count(data = df.plot)
+plot.ex3
+
+ggsave(filename = "../../figures/plots/exp3_response_count.pdf",
+       width = 8,
+       height = 6,
+       device = cairo_pdf)
+```
+### Accuracy over time
+
+```{r}
+df.plot = df.ex3.full %>% 
+  filter(trial == "blicket")
+
+fun_plot_accuracy(data = df.plot,
+  limit = 16)
+
+ggsave(filename = "../../figures/plots/exp3_accuracy.pdf",
+       width = 8,
+       height = 4)
+```
+
+# EXPERIMENT 4: Conjunctive
+
+## DATA
+
+### Read data
+
+```{r}
+df.ex4.trials = read.csv("../../data/experiment4/causal_abstraction4-trials.csv")
+df.ex4.participants = read.csv("../../data/experiment4/causal_abstraction4-participants.csv")
+# df.ex4.prolific_ids = read.csv("../../data/experiment4/causal_abstraction4-workerids.csv")
+```
+
+### Calculate participant bonuses
+
+```{r, eval=FALSE}
+# merge bonuses with prolific ids
+df.ex4.rewards = df.ex4.participants %>% 
+  select(workerid, bonus) %>% 
+  inner_join(df.ex4.prolific_ids) %>% 
+  select(-workerid) %>% 
+  relocate(prolific_participant_id) %>% 
+  mutate(bonus = round.off(bonus, 2))
+
+# calculate average reward
+average_reward = mean(df.ex4.rewards$bonus)
+average_reward
+
+write.table(df.ex4.rewards, "../../data/experiment4/experiment_4-bonuses.csv", sep = ",", col.names = FALSE, row.names = FALSE)
+``` 
+
+### Wrangle
+
+```{r}
+# summarize pop quiz performance for each participant
+df.ex4.pop_quiz = df.ex4.trials %>%
+  filter(trial=='pop_quiz') %>% 
+  mutate(correct_color = case_when(substr(correct_response, 1, 1) == substr(response, 1, 1) ~ 1, TRUE ~ 0),
+         correct_shape = case_when(substr(correct_response, 2, 2) == substr(response, 2, 2) ~ 1, TRUE ~ 0),
+         on_off = case_when(substr(condition, 1, 2) == substr(condition, 4, 5) ~ 'on', TRUE ~ 'off'),
+         blicket_response = case_when(
+           correct_color == 1 & correct_shape == 1 ~ 'fully_congruent',
+           correct_color == 0 & correct_shape == 0 ~ 'fully_incongruent',
+           correct_color == 1 & correct_shape == 0 ~ 'correct_color',
+           correct_color == 0 & correct_shape == 1 ~ 'correct_shape')) %>% 
+  select(workerid, correct_color, on_off, condition, correct_shape, blicket_response)
+
+# summarize performance on each trial type for each participant
+df.ex4.participant_summary = df.ex4.trials %>% 
+  select(-question_order, -error) %>% 
+  mutate(accuracy = case_when(accuracy== 'True' ~1, accuracy=='False'~0)) %>% 
+  group_by(workerid, trial) %>% 
+  summarize(accuracy = mean(accuracy), rt = mean(rt)) %>% 
+  inner_join(df.ex4.pop_quiz,
+             by = "workerid") %>% #add back in pop_quiz info
+  pivot_wider(names_from = trial, values_from = c(rt, accuracy)) %>%  #one participant per line
+  ungroup()
+
+# full dataset (specific info from every trial, along with summary info)
+df.ex4.full = df.ex4.trials %>% 
+  select(workerid,
+         accuracy_bool,
+         rt,
+         trial,
+         trial_index) %>% 
+  inner_join(df.ex4.participant_summary,
+             by = "workerid") %>% 
+  rename(accuracy = accuracy_bool,) %>% 
+  group_by(workerid) %>% 
+  # make sure trials are 1-18
+  mutate( first_blicket_index = min(trial_index),
+          trial_index = case_when(
+            trial == 'blicket' ~ (trial_index - first_blicket_index) / 2 + 1,
+            trial == "pop_quiz" ~ 17,
+            trial == "rule_question" ~ 18)) %>% 
+  select(-first_blicket_index) %>% 
+  ungroup()
+```
+
+## STATS
+
+### Bootstrap counts
+
+```{r, cache=TRUE}
+#make reproducible
+set.seed(1)
+
+#get boostrapped confidence intervals 
+df.ex4.fig1_CI = df.ex4.participant_summary %>%
+  select(blicket_response) %>% 
+  bootstrap(n = 1000) %>% # create 1000 bootstrapped samples
+  mutate(counts = map(.x = strap,
+                      .f = ~ .x %>% 
+                        as_tibble() %>% 
+                        group_by(blicket_response) %>% 
+                        count(blicket_response))) %>% 
+  select(-strap) %>% 
+  unnest(counts) %>% 
+  group_by(blicket_response) %>% 
+  summarize(mean = mean(n),
+            low = quantile(n, 0.025), # calculate the 2.5 / 97.5 percentiles
+            high = quantile(n, 0.975))
+
+#create data for plot
+df.ex4.fig1 = df.ex4.participant_summary %>% 
+  group_by(blicket_response) %>% 
+  count(blicket_response) %>% 
+  inner_join(df.ex4.fig1_CI,
+             by = "blicket_response") %>% 
+  ungroup() %>% 
+  mutate(color = as.factor(c(0, 0, 1, 0))) 
+```
+
+### Multinomial Regression
+
+#### Hypothesis 1: Color vs. shape
+
+```{r}
+# reference = 'correct color'
+df.model = df.ex4.participant_summary %>% 
+  mutate(blicket_response = fct_relevel(blicket_response, "correct_color"))
+
+fit = multinom(formula = blicket_response ~ 1,
+               data = df.model,
+               trace = F)
+
+# broom.mixed summary
+df.tidy = tidy(fit,
+               conf.int = T) %>% 
+  mutate(across(where(is.numeric), ~ round(., 2))) %>% 
+  filter(y.level == "correct_shape")
+
+str_c("B = ", df.tidy$estimate, 
+      ", 95% CI [", df.tidy$conf.low, ", ", df.tidy$conf.high, "],",
+      " p = ", p_format(df.tidy$p.value, leading.zero = F))
+```
+
+#### Hypothesis 2: Fully incongruent vs. partially congruent
+
+```{r}
+# reference = 'rule incongruent'
+df.model = df.ex4.participant_summary %>% 
+  mutate(blicket_response = ifelse(blicket_response %in% c("correct_color", "correct_shape"),
+                                   "partially_congruent", blicket_response),
+         blicket_response = fct_relevel(blicket_response, "fully_incongruent"))
+
+fit = multinom(formula = blicket_response ~ 1,
+               data = df.model,
+               trace = F)
+
+# broom.mixed summary
+df.tidy = tidy(fit,
+               conf.int = T) %>% 
+  mutate(across(where(is.numeric), ~ round(., 2))) %>% 
+  filter(y.level == "partially_congruent")
+
+str_c("B = ", df.tidy$estimate, 
+      ", 95% CI [", df.tidy$conf.low, ", ", df.tidy$conf.high, "],",
+      " p = ", p_format(df.tidy$p.value, leading.zero = F))
+```
+
+### Accuracy as a function of outcome
+
+```{r}
+df.ex4.accuracy_outcome = df.ex4.participant_summary %>% 
+  count(on_off, accuracy_pop_quiz) %>% 
+  pivot_wider(names_from = accuracy_pop_quiz,
+              values_from = n) %>% 
+  mutate(percentage = `1` / (`0` + `1`))
+
+df.ex4.accuracy_outcome %>% 
+  print_table()
+```
+
+
+## FIGURES
+
+### Count
+
+```{r fig.height=6, fig.width=8}
+df.plot = df.ex4.fig1 %>% 
+  mutate(blicket_response = factor(blicket_response,
+                                   levels = c("fully_congruent",
+                                              "correct_shape",
+                                              "correct_color",
+                                              "fully_incongruent"),
+                                   labels = c("congruent",
+                                              "correct\nshape",
+                                              "correct\ncolor",
+                                              "incongruent")))
+
+plot.ex4 = fun_plot_count(data = df.plot)
+plot.ex4
+
+ggsave(filename = "../../figures/plots/exp4_response_count.pdf",
+       width = 8,
+       height = 6,
+       device = cairo_pdf)
+```
+
+### Accuracy over time
+
+```{r}
+df.plot = df.ex4.full %>% 
+  filter(trial == "blicket")
+
+fun_plot_accuracy(data = df.plot,
+  limit = 16)
+
+ggsave(filename = "../../figures/plots/exp4_accuracy.pdf",
+       width = 8,
+       height = 4)
+```
+# COMBINED: BLICKETS
+
+## STATS 
+
+### Demographics 
+
+```{r}
+df.blickets.participants = df.ex1.participants %>% 
+  mutate(condition = "feedback") %>% 
+  bind_rows(df.ex2.participants %>% 
+              mutate(condition = "no feedback"),
+            df.ex3.participants %>% 
+              mutate(condition = "short"),
+            df.ex4.participants %>% 
+              mutate(condition = "conjunctive")) %>% 
+    select(condition, workerid, age, gender, race, ethnicity)
+  
+# race
+df.blickets.participants %>% 
+  count(race) %>% 
+  arrange(desc(n))
+
+# ethnicity
+df.blickets.participants %>% 
+  count(ethnicity) %>% 
+  arrange(desc(n))
+
+# gender
+df.blickets.participants %>% 
+  count(gender) %>% 
+  arrange(desc(n))
+
+# age
+df.blickets.participants %>% 
+  summarize(age_mean = mean(age),
+            age_sd = sd(age)) %>% 
+  print_table(digits = 0)
+
+# condition 
+df.blickets.participants %>% 
+  count(condition)
+
+df.blickets.participants %>% nrow()
+```
+### Accuracy 
+
+```{r}
+df.ex1.pop_quiz %>% 
+  mutate(condition = "feedback") %>% 
+  bind_rows(df.ex2.pop_quiz %>% 
+              mutate(condition = "no feedback")) %>% 
+  count(blicket_response) %>% 
+  mutate(p = n / sum(n)) %>% 
+  print_table()
+```
+
+
+
+## FIGURES 
+
+### Counts
+
+```{r, eval=FALSE}
+plot.ex1 + 
+  plot.ex2 + 
+  plot.ex3 + 
+  plot.ex4 + 
+  plot_layout(ncol = 2, 
+              nrow = 2) + 
+  plot_annotation(tag_levels = "A")
+
+ggsave(filename = "../../figures/plots/exp_combined_count.pdf", 
+       width = 16,
+       height = 8,
+       device = cairo_pdf)
+```
+
+## TABLES
+
+### Accuracy as a function of outcome
+
+```{r}
+bind_rows(df.ex1.accuracy_outcome %>% 
+            mutate(condition = "feedback"),
+          df.ex2.accuracy_outcome %>% 
+            mutate(condition = "no feedback"),
+          df.ex3.accuracy_outcome %>% 
+            mutate(condition = "short"),
+          df.ex4.accuracy_outcome %>% 
+            mutate(condition = "conjunctive")) %>% 
+  select(condition, on_off, percentage) %>% 
+  pivot_wider(names_from = condition,
+              values_from = percentage) %>% 
+  rename(blicket = "on_off") %>% 
+  mutate(blicket = factor(blicket,
+                          levels = c("on", "off"),
+                          labels = c("yes", "no")),
+         across(.cols = -blicket,
+                .fns = ~ str_c(round(. * 100), "%"))) %>% 
+  arrange(blicket) %>% 
+  print_table()
+```
+
+
+# EXPERIMENT 5: Physics
+
+## DATA
+
+### Read Data
+
+```{r}
+df.ex5.trials = read.csv("../../data/experiment5/causal_abstraction5-trials.csv")
+df.ex5.participants = read.csv("../../data/experiment5/causal_abstraction5-participants.csv")
+# df.ex5.prolific_ids = read.csv("../../data/experiment5/causal_abstraction5-workerids.csv")
+```
+
+### Wrangle Data
+
+```{r}
+df.ex5.surprise_quiz = df.ex5.trials %>% 
+  filter(trial == 'surprise_quiz') %>% 
+  mutate(end_position = end_posision,
+         distance_from_correct = abs(selected_position - end_position)) %>% 
+  select(-c(accuracy_bool,
+            choices,
+            correct,
+            correct_response,
+            crosses,
+            end_posision,
+            internal_node_id,
+            question_order,
+            response,
+            stimulus,
+            error,
+            trial_type)) %>% 
+  mutate(end_position = end_position + 1, 
+         selected_position = selected_position + 1)
+```
+
+### Calculate participant bonuses
+
+```{r, eval=FALSE}
+#merge bonuses with prolific ids
+df.ex5.rewards = df.ex5.participants %>% 
+  select(workerid, bonus) %>% 
+  inner_join(df.ex5.prolific_ids) %>% 
+  select(-workerid) %>% 
+  relocate(prolific_participant_id)
+
+#write out bonus csv
+write.table(df.ex5.rewards,
+            "../../data/experiment5/experiment_5-bonuses.csv",
+            sep = ",", 
+            col.names = FALSE,
+            row.names = FALSE,
+            quote = FALSE)
+``` 
+
+## STATS
+
+### Bootstrap counts
+
+```{r, cache=TRUE}
+# make reproducible
+set.seed(1)
+
+df.ex5.bootstraps = df.ex5.surprise_quiz %>%
+  bootstraps(times = 1000,
+             end_position) %>% 
+  mutate(counts = map(.x = splits,
+                      .f = ~ .x %>% 
+                        as_tibble() %>% 
+                        count(end_position, selected_position, .drop = F))) %>% 
+  select(-splits) %>% 
+  unnest(counts) %>% 
+  group_by(end_position, selected_position) %>% 
+  summarize(low = quantile(n, 0.025), 
+            high = quantile(n, 0.975))
+```
+
+### Hypothesis 1: Outcome-relevant features matter more
+
+```{r}
+df.ex5.hyp1 = df.ex5.surprise_quiz %>% 
+  select(workerid, end_position, selected_position) %>% 
+  mutate(relevant = ifelse(end_position %in% c(1, 2), -1, 1),
+         irrelevant = ifelse(end_position %in% c(1, 3), -1, 1)) %>% 
+  mutate(selected_position = factor(selected_position,
+                                    levels = 1:4,
+                                    ordered = T),
+         across(.cols = c(relevant, irrelevant), .fns = ~ as.factor(.)))
+
+fit.brm_ex5_hyp1 = brm(formula = selected_position ~ relevant * irrelevant + (1 | workerid),
+                       family = cumulative(link = "probit"),
+                       data = df.ex5.hyp1,
+                       file = "cache/fit.brm_ex5_hyp1",
+                       cores = 4, 
+                       seed = 1) 
+
+fit.brm_ex5_hyp1 %>% 
+  as_draws_df() %>% 
+  select(b_relevant1, b_irrelevant1) %>% 
+  mutate(difference = b_irrelevant1 - b_relevant1) %>% 
+  summarize(mean = mean(difference),
+            low = quantile(difference, 0.025),
+            high = quantile(difference, 0.975)) %>% 
+  print_table()
+```
+
+### Hypothesis 2: Outcome-congruent selection
+
+```{r}
+df.ex5.hyp2 = df.ex5.surprise_quiz %>% 
+  select(workerid, end_position, selected_position) %>% 
+  filter(end_position %in% c(2, 3)) %>% 
+  mutate(response = NA,
+         response = ifelse(end_position == 2 & selected_position == 1, 1, response),
+         response = ifelse(end_position == 2 & selected_position == 3, 0, response),
+         response = ifelse(end_position == 3 & selected_position == 4, 1, response),
+         response = ifelse(end_position == 3 & selected_position == 2, 0, response))
+
+fit.brm_ex5_hyp2 = brm(formula = response ~ 1 + (1 | workerid),
+                       family = "bernoulli",
+                       data = df.ex5.hyp2,
+                       file = "cache/fit.brm_ex5_hyp2",
+                       cores = 4, 
+                       seed = 1,
+                       control = list(adapt_delta = 0.9)) 
+
+fit.brm_ex5_hyp2 %>% 
+  tidy() %>% 
+  filter(effect == "fixed") %>% 
+  select(estimate, contains("conf")) %>% 
+  mutate(across(.cols = everything(),
+                .fns = ~ inv.logit(.) * 100)) %>% 
+  print_table()
+```
+## FIGURES
+
+### Count
+
+```{r, warning=FALSE, message=FALSE}
+df.plot = df.ex5.surprise_quiz %>% 
+  count(end_position, selected_position, .drop = F) %>% 
+  left_join(df.ex5.bootstraps, 
+            by = c("end_position", "selected_position")) %>% 
+  mutate(fill = 0,
+         fill = ifelse(end_position == selected_position, 1, fill),
+         fill = ifelse(end_position == 1 & selected_position == 2, 2, fill),
+         fill = ifelse(end_position == 2 & selected_position == 1, 2, fill),
+         fill = ifelse(end_position == 3 & selected_position == 4, 2, fill),
+         fill = ifelse(end_position == 4 & selected_position == 3, 2, fill),
+         selected_position = as.factor(selected_position),
+         fill = as.factor(fill))
+
+
+fun_plot_count_physics(data = df.plot,
+                       name = "position")
+
+ggsave(filename = "../../figures/plots/exp5_counts.pdf",
+       width = 10,
+       height = 4)
+```
+### Accuracy over time
+
+```{r}
+df.plot = df.ex5.trials %>% 
+  filter(trial == "prediction_trial") %>% 
+  select(workerid, trial_index, correct) %>% 
+  group_by(workerid) %>% 
+  mutate(trial_index = factor(trial_index, 
+                              levels = unique(trial_index),
+                              labels = 1:16),
+         trial_index = as.numeric(as.character(trial_index))) %>% 
+  ungroup() %>% 
+  mutate(accuracy = ifelse(correct == "True", 1, 0))
+
+fun_plot_accuracy(data = df.plot,
+                  limit = 16)
+
+ggsave(filename = "../../figures/plots/exp5_accuracy.pdf",
+       width = 8,
+       height = 4)
+```
+
+# EXPERIMENT 6: Physics short
+
+## DATA
+
+### Read Data
+
+```{r}
+df.ex6.trials = read.csv("../../data/experiment6/causal_abstraction6-trials.csv")
+df.ex6.participants = read.csv("../../data/experiment6/causal_abstraction6-participants.csv")
+# df.ex6.prolific_ids = read.csv("../../data/experiment6/causal_abstraction6-workerids.csv")
+# df.ex6.batch1_bonuses = read.table("../../data/experiment6/experiment_6-bonuses_batch1.csv", 
+#                                    header = FALSE,
+#                                    sep = ",",
+#                                    col.names = c("id", "bonus"))
+```
+
+### Wrangle Data
+
+```{r}
+df.ex6.surprise_quiz = df.ex6.trials %>% 
+  filter(trial == 'surprise_quiz') %>% 
+  mutate(end_position = end_posision,
+         distance_from_correct = abs(selected_position - end_position)) %>% 
+  select(-c(accuracy_bool,
+            choices,
+            correct,
+            correct_response,
+            crosses,
+            end_posision,
+            internal_node_id,
+            question_order,
+            response,
+            stimulus,
+            error, trial_type)) %>% 
+  arrange(workerid) %>% #Keep only 30 first from each condition
+  group_by(condition, workerid) %>%
+  group_by(condition) %>%
+  slice(1:120) %>% #Each participant has 4 observations (keep 120 obs per condition)
+  ungroup() %>% 
+  mutate(end_position = end_position + 1, 
+         selected_position = selected_position + 1)
+```
+
+### Calculate participant bonuses
+
+```{r, eval=FALSE}
+
+# 4 participants prolific ids were dissociated with their workerids, 
+# they'll each be assigned the highest of their bonuses(0.24)
+unknown_ids = data.frame(prolific_participant_id = c('5559b1a3fdf99b56816b06bf',
+                                                     '610af8ce7c235e4b353748f1',
+                                                     '6384cfd0e7eb8e11550c077f',
+                                                     '5eec1d962da7b41ccb19d038'), 
+                         bonus = 0.24)
+
+# merge bonuses with prolific ids
+# for batch2 bonuses, keep only participants not in existing bonus file
+df.ex6.rewards = df.ex6.participants %>% 
+  select(workerid, bonus) %>% 
+  inner_join(df.ex6.prolific_ids) %>% 
+  select(-workerid) %>% 
+  relocate(prolific_participant_id) %>% 
+  rbind(unknown_ids) %>% 
+  filter((prolific_participant_id != '<no-id>') &
+           !(prolific_participant_id %in% df.ex6.batch1_bonuses$id))
+
+# write out bonus csv
+write.table(df.ex6.rewards,
+            "../../data/experiment6/experiment_6-bonuses_batch2.csv",
+            sep = ",",
+            col.names = FALSE,
+            row.names = FALSE,
+            quote = FALSE)
+``` 
+
+## STATS
+
+### Bootstrap counts
+
+```{r, cache=TRUE}
+# make reproducible
+set.seed(1)
+
+df.ex6.bootstraps = df.ex6.surprise_quiz %>%
+  bootstraps(times = 1000,
+             end_position) %>% 
+  mutate(counts = map(.x = splits,
+                      .f = ~ .x %>% 
+                        as_tibble() %>% 
+                        count(end_position, selected_position, .drop = F))) %>% 
+  select(-splits) %>% 
+  unnest(counts) %>% 
+  group_by(end_position, selected_position) %>% 
+  summarize(low = quantile(n, 0.025), 
+            high = quantile(n, 0.975))
+```
+
+### Hypothesis 1: Outcome-relevant features matter more
+
+```{r}
+df.ex6.hyp1 = df.ex6.surprise_quiz %>% 
+  select(workerid, end_position, selected_position) %>% 
+  mutate(relevant = ifelse(end_position %in% c(1, 2), -1, 1),
+         irrelevant = ifelse(end_position %in% c(1, 3), -1, 1)) %>% 
+  mutate(selected_position = factor(selected_position,
+                                    levels = 1:4,
+                                    ordered = T),
+         across(.cols = c(relevant, irrelevant), .fns = ~ as.factor(.)))
+
+fit.brm_ex6_hyp1 = brm(formula = selected_position ~ relevant * irrelevant + (1 | workerid),
+                       family = cumulative(link = "probit"),
+                       data = df.ex6.hyp1,
+                       file = "cache/fit.brm_ex6_hyp1",
+                       cores = 4, 
+                       seed = 1) 
+
+fit.brm_ex6_hyp1 %>% 
+  as_draws_df() %>% 
+  select(b_relevant1, b_irrelevant1) %>% 
+  mutate(difference = b_irrelevant1 - b_relevant1) %>% 
+  summarize(mean = mean(difference),
+            low = quantile(difference, 0.025),
+            high = quantile(difference, 0.975)) %>% 
+  print_table()
+```
+
+### Hypothesis 2: Outcome-congruent selection
+
+```{r}
+df.ex6.hyp2 = df.ex6.surprise_quiz %>% 
+  select(workerid, end_position, selected_position) %>% 
+  filter(end_position %in% c(2, 3)) %>% 
+  mutate(response = NA,
+         response = ifelse(end_position == 2 & selected_position == 1, 1, response),
+         response = ifelse(end_position == 2 & selected_position == 3, 0, response),
+         response = ifelse(end_position == 3 & selected_position == 4, 1, response),
+         response = ifelse(end_position == 3 & selected_position == 2, 0, response))
+
+fit.brm_ex6_hyp2 = brm(formula = response ~ 1 + (1 | workerid),
+                       family = "bernoulli",
+                       data = df.ex6.hyp2,
+                       file = "cache/fit.brm_ex6_hyp2",
+                       cores = 4, 
+                       seed = 1,
+                       control = list(adapt_delta = 0.95)) 
+
+fit.brm_ex6_hyp2 %>% 
+  tidy() %>% 
+  filter(effect == "fixed") %>% 
+  select(estimate, contains("conf")) %>% 
+  mutate(across(.cols = everything(),
+                .fns = ~ inv.logit(.) * 100)) %>% 
+  print_table()
+```
+
+
+## FIGURES
+
+### Counts
+
+```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=4}
+df.plot = df.ex6.surprise_quiz %>% 
+  count(end_position, selected_position, .drop = F) %>% 
+  left_join(df.ex6.bootstraps, 
+            by = c("end_position", "selected_position")) %>% 
+  mutate(fill = 0,
+         fill = ifelse(end_position == selected_position, 1, fill),
+         fill = ifelse(end_position == 1 & selected_position == 2, 2, fill),
+         fill = ifelse(end_position == 2 & selected_position == 1, 2, fill),
+         fill = ifelse(end_position == 3 & selected_position == 4, 2, fill),
+         fill = ifelse(end_position == 4 & selected_position == 3, 2, fill),
+         selected_position = as.factor(selected_position),
+         fill = as.factor(fill))
+
+fun_plot_count_physics(data = df.plot,
+                       name = "position")
+
+ggsave(filename = "../../figures/plots/exp6_counts.pdf",
+       width = 10,
+       height = 4)
+```
+### Accuracy over time
+
+```{r}
+df.plot = df.ex6.trials %>% 
+  filter(trial == "prediction_trial") %>% 
+  select(workerid, trial_index, correct) %>% 
+  group_by(workerid) %>% 
+  mutate(trial_index = factor(trial_index, 
+                              levels = unique(trial_index),
+                              labels = 1:4),
+         trial_index = as.numeric(as.character(trial_index))) %>% 
+  ungroup() %>% 
+  mutate(accuracy = ifelse(correct == "True", 1, 0))
+
+fun_plot_accuracy(data = df.plot,
+                  limit = 4)
+
+ggsave(filename = "../../figures/plots/exp6_accuracy.pdf",
+       width = 4,
+       height = 4)
+```
+
+# EXPERIMENT 7: Physics conjunctive
+
+## DATA
+
+### Read Data
+
+```{r}
+df.ex7.trials = read.csv("../../data/experiment7/causal_abstraction7-trials.csv")
+df.ex7.participants = read.csv("../../data/experiment7/causal_abstraction7-participants.csv")
+# df.ex7.prolific_ids = read.csv("../../data/experiment7/causal_abstraction7-workerids.csv")
+# df.ex7.batch1_bonuses = read.table("../../data/experiment7/experiment_7-bonuses_batch1.csv", header=FALSE,sep=",", col.names=c('id', 'bonus'))
+```
+
+### Wrangle Data
+
+```{r}
+df.ex7.surprise_quiz = df.ex7.trials %>% 
+  filter(trial == 'surprise_quiz') %>% 
+  mutate(end_position = end_posision,
+         distance_from_correct = abs(selected_position - end_position)) %>% 
+  select(-c(accuracy_bool,
+            choices,
+            correct,
+            correct_response,
+            crosses,
+            end_posision,
+            internal_node_id,
+            question_order,
+            response,
+            stimulus,
+            error, trial_type)) %>% 
+  # arrange(workerid) %>% #Keep only 30 first from each condition
+  # group_by(condition, workerid) %>%
+  # group_by(condition) %>%
+  # slice(1:120) %>% #Each participant has 4 observations (keep 120 obs per condition)
+  # ungroup() %>% 
+  mutate(end_position = end_position + 1, 
+         selected_position = selected_position + 1)
+```
+
+### Calculate participant bonuses
+
+```{r, eval=FALSE}
+
+df.ex7.rewards = df.ex7.participants %>% 
+  select(workerid, bonus) %>% 
+  left_join(df.ex7.prolific_ids,
+            by = "workerid") %>% 
+  select(prolific_participant_id, bonus) %>% 
+  filter(bonus > 0)
+
+# write out bonus csv
+write.table(df.ex7.rewards,
+            "../../data/experiment7/experiment_7-bonuses.csv",
+            sep = ",",
+            col.names = FALSE,
+            row.names = FALSE,
+            quote = FALSE)
+``` 
+
+## STATS
+
+### Bootstrap counts
+
+```{r, cache=TRUE}
+# make reproducible
+set.seed(1)
+
+df.ex7.bootstraps = df.ex7.surprise_quiz %>%
+  bootstraps(times = 1000,
+             end_position) %>% 
+  mutate(counts = map(.x = splits,
+                      .f = ~ .x %>% 
+                        as_tibble() %>% 
+                        count(end_position, selected_position, .drop = F))) %>% 
+  select(-splits) %>% 
+  unnest(counts) %>% 
+  group_by(end_position, selected_position) %>% 
+  summarize(low = quantile(n, 0.025), 
+            high = quantile(n, 0.975))
+```
+
+### Hypothesis 1: Responses for position 3
+
+```{r}
+df.ex7.hyp1 = df.ex7.surprise_quiz %>% 
+  select(workerid, end_position, selected_position) %>% 
+  filter(end_position == 3) %>% 
+  mutate(response = NA,
+         response = ifelse(selected_position == 2, 1, response),
+         response = ifelse(selected_position == 4, 0, response))
+
+fit.brm_ex7_hyp1 = brm(formula = response ~ 1,
+                       family = "bernoulli",
+                       data = df.ex7.hyp1,
+                       file = "cache/fit.brm_ex7_hyp1",
+                       cores = 4, 
+                       seed = 1) 
+
+fit.brm_ex7_hyp1 %>% 
+  tidy() %>% 
+  filter(effect == "fixed") %>% 
+  select(estimate, contains("conf")) %>% 
+  mutate(across(.cols = everything(),
+                .fns = ~ inv.logit(.) * 100)) %>% 
+  print_table()
+```
+
+### Hypothesis 2: Correct vs. incorrect
+
+```{r}
+df.ex7.hyp2 = df.ex7.surprise_quiz %>% 
+  select(workerid, end_position, selected_position) %>% 
+  mutate(response = (end_position == selected_position)*1,
+         position = ifelse(end_position == 4, 1, 0))
+  
+fit.brm_ex7_hyp2 = brm(formula = response ~ 1 + position + (1 | workerid),
+                       family = "bernoulli",
+                       data = df.ex7.hyp2,
+                       file = "cache/fit.brm_ex7_hyp2",
+                       cores = 4, 
+                       seed = 1) 
+
+fit.brm_ex7_hyp2 %>% 
+  emmeans(specs = pairwise ~ position,
+          type = "response") %>% 
+  summary(point.est = "mean") %>% 
+  print(digits = 4)
+
+# percentage correct 
+fit.brm_ex7_hyp2 %>% 
+  emmeans(specs = pairwise ~ position,
+          type = "response") %>% 
+  pluck("emmeans") %>% 
+  as_tibble() %>% 
+  mutate(across(.cols = - position,
+                .fns = ~ . * 100)) %>% 
+  print_table()
+
+# difference 
+fit.brm_ex7_hyp2 %>% 
+  emmeans(specs = pairwise ~ position) %>% 
+  pluck("contrasts") %>% 
+  as_tibble() %>% 
+  print_table()
+```
+## FIGURES
+
+### Counts
+
+```{r, warning=FALSE, message=FALSE, fig.width=10, fig.height=4}
+df.plot = df.ex7.surprise_quiz %>% 
+  count(end_position, selected_position, .drop = F) %>% 
+  left_join(df.ex7.bootstraps, 
+            by = c("end_position", "selected_position")) %>% 
+  mutate(fill = 0,
+         fill = ifelse(end_position == selected_position, 1, fill),
+         selected_position = as.factor(selected_position),
+         fill = as.factor(fill),
+         condition = "conjunctive")
+
+  fun_load_image = function(image){
+    readPNG(str_c("../../figures/diagrams/selection/conjunction_position", image, ".png"))
+  }
+  
+  df.images = df.plot %>% 
+    distinct(end_position) %>% 
+    mutate(grob = map(.x = end_position,
+                      .f = ~ fun_load_image(image = .x)))
+  
+  df.text = df.plot %>% 
+    distinct(end_position) %>% 
+    mutate(x = 4,
+           y = 155,
+           text = 1:4)
+  
+  plot = ggplot(data = df.plot,
+                mapping = aes(x = selected_position,
+                              y = n,
+                              fill = fill)) + 
+    geom_bar(stat = "identity",
+             color = "black") + 
+    geom_linerange(mapping = aes(ymin = low,
+                                 ymax = high)) + 
+    geom_custom(data = df.images,
+                mapping = aes(data = grob,
+                              x = -Inf,
+                              y = Inf,
+                              fill = NA),
+                grob_fun = function(x) rasterGrob(x,
+                                                  interpolate = T,
+                                                  vjust = -0.05,
+                                                  hjust = 0)) + 
+    geom_text(data = df.text,
+              mapping = aes(x = x,
+                            y = y,
+                            label = text,
+                            fill = NA),
+              color = "white",
+              size = 8) + 
+    facet_grid(cols = vars(end_position),
+               rows = vars(condition)) +
+    labs(x = "selection",
+         y = "count") + 
+    scale_fill_manual(values = c("0" = "gray80",
+                                 "1" = "darkgreen",
+                                 "2" = "orange")) +
+    scale_y_continuous(breaks = seq(0, 80, 20),
+                       expand = expansion(add = c(0, 5))) + 
+    coord_cartesian(clip = "off",
+                    ylim = c(0, 95)) + 
+    
+    theme(legend.position = "none",
+          panel.grid.major.y = element_line(),
+          strip.background.x = element_blank(),
+          strip.text.x = element_blank(),
+          plot.margin = margin(t = 3.5, l = 0.2, r = 0.2, b = 0.1, unit = "cm"))
+
+# fun_plot_count_physics(data = df.plot,
+#                        name = "conjunction_position")
+
+ggsave(filename = "../../figures/plots/exp7_counts.pdf",
+       width = 10,
+       height = 4)
+```
+
+### Accuracy over time
+
+```{r}
+df.plot = df.ex7.trials %>% 
+  filter(trial == "prediction_trial") %>% 
+  select(workerid, trial_index, correct) %>% 
+  group_by(workerid) %>% 
+  mutate(trial_index = factor(trial_index, 
+                              levels = unique(trial_index),
+                              labels = 1:16),
+         trial_index = as.numeric(as.character(trial_index))) %>% 
+  ungroup() %>% 
+  mutate(accuracy = ifelse(correct == "True", 1, 0))
+
+fun_plot_accuracy(data = df.plot,
+  limit = 16)
+
+ggsave(filename = "../../figures/plots/exp7_accuracy.pdf",
+       width = 8,
+       height = 4)
+```
+
+# COMBINED: PHYSICS
+
+## STATS 
+
+### Demographics 
+
+```{r}
+df.physics.participants = df.ex5.participants %>% 
+  mutate(condition = "long") %>% 
+  bind_rows(df.ex6.participants %>% 
+  inner_join(df.ex6.surprise_quiz %>% 
+               distinct(workerid),
+             by = "workerid") %>% 
+              mutate(condition = "short"),
+            df.ex7.participants %>% 
+              mutate(condition = "conjunctive")) %>% 
+    select(condition, workerid, age, gender, race, ethnicity)
+  
+# race
+df.physics.participants %>% 
+  count(race) %>% 
+  arrange(desc(n))
+
+# ethnicity
+df.physics.participants %>% 
+  count(ethnicity) %>% 
+  arrange(desc(n))
+
+# gender
+df.physics.participants %>% 
+  count(gender) %>% 
+  arrange(desc(n))
+
+# age
+df.physics.participants %>% 
+  summarize(age_mean = mean(age, na.rm = T),
+            age_sd = sd(age, na.rm = T)) %>% 
+  print_table(digits = 0)
+
+# condition 
+df.physics.participants %>% 
+  count(condition)
+
+nrow(df.physics.participants)
+```
+
+### Accuracy depending on final position 
+
+```{r}
+df.ex5.surprise_quiz %>% 
+  select(workerid, accuracy, end_position, selected_position) %>% 
+  mutate(condition = "long") %>% 
+  bind_rows(df.ex6.surprise_quiz %>% 
+              select(workerid, accuracy, end_position, selected_position) %>% 
+              mutate(condition = "short")) %>% 
+  mutate(close = ifelse(end_position %in% c(2, 3), "yes", "no"),
+         accuracy = ifelse(accuracy == "False", F, T)) %>% 
+  group_by(condition, close) %>% 
+  summarize(accuracy = sum(accuracy)/n()) %>% 
+  print_table()
+```
+
+
+## FIGURES 
+
+### Counts
+
+```{r, fig.width=10, fig.height=6, message=FALSE, warning=FALSE}
+df.plot = df.ex5.surprise_quiz %>% 
+  count(end_position, selected_position, .drop = F) %>% 
+  left_join(df.ex5.bootstraps, 
+            by = c("end_position", "selected_position")) %>% 
+  mutate(condition = "long") %>% 
+  bind_rows(df.ex6.surprise_quiz %>% 
+              count(end_position, selected_position, .drop = F) %>% 
+              left_join(df.ex6.bootstraps, 
+                        by = c("end_position", "selected_position")) %>% 
+              mutate(condition = "short")) %>% 
+  mutate(fill = 0,
+         fill = ifelse(end_position == selected_position, 1, fill),
+         fill = ifelse(end_position == 1 & selected_position == 2, 2, fill),
+         fill = ifelse(end_position == 2 & selected_position == 1, 2, fill),
+         fill = ifelse(end_position == 3 & selected_position == 4, 2, fill),
+         fill = ifelse(end_position == 4 & selected_position == 3, 2, fill),
+         selected_position = as.factor(selected_position),
+         fill = as.factor(fill))
+
+fun_load_image = function(image){
+  readPNG(str_c("../../figures/diagrams/selection/position", image, ".png"))
+}
+
+df.images = df.plot %>% 
+  distinct(end_position, condition) %>% 
+  mutate(grob = map(.x = end_position,
+                    .f = ~ fun_load_image(image = .x))) %>% 
+  mutate(grob = ifelse(condition == "short", NA, grob))
+
+df.text = df.plot %>% 
+  distinct(end_position, condition) %>% 
+  group_by(condition) %>% 
+  mutate(x = 4,
+         y = 155,
+         text = 1:4) %>% 
+  ungroup() %>% 
+  mutate(text = ifelse(condition == "short", NA, text))
+
+plot = ggplot(data = df.plot,
+              mapping = aes(x = selected_position,
+                            y = n,
+                            fill = fill)) + 
+  geom_bar(stat = "identity",
+           color = "black") + 
+  geom_linerange(mapping = aes(ymin = low,
+                               ymax = high)) + 
+  geom_custom(data = df.images,
+              mapping = aes(data = grob,
+                            x = -Inf,
+                            y = Inf,
+                            fill = NA),
+              grob_fun = function(x) rasterGrob(x,
+                                                interpolate = T,
+                                                vjust = -0.05,
+                                                hjust = 0)) + 
+  geom_text(data = df.text,
+            mapping = aes(x = x,
+                          y = y,
+                          label = text,
+                          fill = NA),
+            color = "white",
+            size = 8) + 
+  facet_grid(cols = vars(end_position),
+             rows = vars(condition)) +
+  labs(x = "selection",
+       y = "count") + 
+  scale_fill_manual(values = c("0" = "gray80",
+                               "1" = "darkgreen",
+                               "2" = "orange")) +
+  scale_y_continuous(breaks = seq(0, 80, 20),
+                     expand = expansion(add = c(0, 5))) + 
+  coord_cartesian(clip = "off",
+                  ylim = c(0, 95)) + 
+  
+  theme(legend.position = "none",
+        panel.grid.major.y = element_line(),
+        strip.background.x = element_blank(),
+        strip.text.x = element_blank(),
+        plot.margin = margin(t = 3.5, l = 0.2, r = 0.2, b = 0.1, unit = "cm"),
+        panel.spacing.y = unit(0.5, "cm"))
+
+ggsave(filename = "../../figures/plots/exp56_counts.pdf",
+       width = 10,
+       height = 6)
+```
+
+
+
+# Session info
+
+```{r, echo=F}
+sessionInfo()
+```
