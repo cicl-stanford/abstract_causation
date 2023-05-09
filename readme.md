@@ -1,6 +1,6 @@
 # Learning what matters: Causal abstraction in human inference
 
-This repository contains the experiments, data, analyses, and figures for the paper "Learning what matters: Causal abstraction in human inference" by Steven Shin (Steven.M.Shin.23@dartmouth.edu) and Tobias Gerstenberg (gerstenberg@stanford.edu).
+This repository contains the experiments, data, analyses, and figures for the paper ["Learning what matters: Causal abstraction in human inference"](https://psyarxiv.com/br2vz) by Steven Shin (Steven.M.Shin.23@dartmouth.edu) and Tobias Gerstenberg (gerstenberg@stanford.edu).
 
 ## Abstract
 
